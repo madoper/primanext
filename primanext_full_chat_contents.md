@@ -40354,14 +40354,2683 @@ async function getCachedData<T>(queryKey: string[]): Promise<T | null> {
 
 ---
 
-*Продолжение следует с API Integration, Authentication & Security, Push Notifications, Deep Linking, Performance Optimization, Testing, CI/CD...*
+```markdown
+# Секция Mobile Applications системы Прима-NEXT (продолжение, часть 3 - финал)
 
-Продолжить с финальными разделами мобильного приложения?
+---
 
-[1](https://www.bunnyshell.com/blog/qa-testing-in-2025-revolutionize-your-workflow-wit/)
-[2](https://www.testrail.com/blog/software-testing-trends/)
-[3](https://www.globalapptesting.com/blog/software-testing-best-practices)
-[4](https://www.geeksforgeeks.org/blogs/software-testing-best-practices/)
+## 7. API Integration
+
+### 7.1 API Client Configuration
+
+```
+// ============================================
+// API CLIENT & INTEGRATION
+// ============================================
+
+// src/services/api/client.ts
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { STORAGE_KEYS } from '@/constants/storage';
+import { API_CONFIG } from '@/constants/api';
+import NetInfo from '@react-native-community/netinfo';
+import * as Sentry from '@sentry/react-native';
+
+class APIClient {
+  private instance: AxiosInstance;
+  private refreshTokenPromise: Promise<string> | null = null;
+  
+  constructor() {
+    this.instance = axios.create({
+      baseURL: API_CONFIG.BASE_URL,
+      timeout: 30000,
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Client-Platform': 'mobile',
+        'X-Client-Version': API_CONFIG.APP_VERSION,
+      },
+    });
+    
+    this.setupInterceptors();
+  }
+  
+  private setupInterceptors() {
+    // Request interceptor
+    this.instance.interceptors.request.use(
+      async (config) => {
+        // Check network connectivity
+        const netInfo = await NetInfo.fetch();
+        if (!netInfo.isConnected) {
+          throw new Error('No internet connection');
+        }
+        
+        // Add auth token
+        const token = await this.getAccessToken();
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        
+        // Add request ID for tracing
+        config.headers['X-Request-ID'] = this.generateRequestId();
+        
+        // Log request in development
+        if (__DEV__) {
+          console.log('API Request:', {
+            method: config.method?.toUpperCase(),
+            url: config.url,
+            params: config.params,
+            data: config.data,
+          });
+        }
+        
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+    
+    // Response interceptor
+    this.instance.interceptors.response.use(
+      (response) => {
+        // Log response in development
+        if (__DEV__) {
+          console.log('API Response:', {
+            url: response.config.url,
+            status: response.status,
+            data: response.data,
+          });
+        }
+        
+        return response;
+      },
+      async (error: AxiosError) => {
+        const originalRequest = error.config as AxiosRequestConfig & {
+          _retry?: boolean;
+        };
+        
+        // Handle 401 Unauthorized
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true;
+          
+          try {
+            const newToken = await this.refreshAccessToken();
+            
+            if (newToken && originalRequest.headers) {
+              originalRequest.headers.Authorization = `Bearer ${newToken}`;
+            }
+            
+            return this.instance(originalRequest);
+          } catch (refreshError) {
+            // Refresh failed - logout user
+            await this.handleAuthenticationError();
+            return Promise.reject(refreshError);
+          }
+        }
+        
+        // Handle other errors
+        return this.handleError(error);
+      }
+    );
+  }
+  
+  private async getAccessToken(): Promise<string | null> {
+    return await AsyncStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+  }
+  
+  private async refreshAccessToken(): Promise<string> {
+    // Prevent multiple simultaneous refresh attempts
+    if (this.refreshTokenPromise) {
+      return this.refreshTokenPromise;
+    }
+    
+    this.refreshTokenPromise = (async () => {
+      try {
+        const refreshToken = await AsyncStorage.getItem(
+          STORAGE_KEYS.REFRESH_TOKEN
+        );
+        
+        if (!refreshToken) {
+          throw new Error('No refresh token available');
+        }
+        
+        const response = await axios.post(
+          `${API_CONFIG.BASE_URL}/auth/refresh`,
+          { refreshToken }
+        );
+        
+        const { accessToken, refreshToken: newRefreshToken } = response.data;
+        
+        // Save new tokens
+        await AsyncStorage.multiSet([
+          [STORAGE_KEYS.ACCESS_TOKEN, accessToken],
+          [STORAGE_KEYS.REFRESH_TOKEN, newRefreshToken],
+        ]);
+        
+        return accessToken;
+      } finally {
+        this.refreshTokenPromise = null;
+      }
+    })();
+    
+    return this.refreshTokenPromise;
+  }
+  
+  private async handleAuthenticationError() {
+    // Clear tokens
+    await AsyncStorage.multiRemove([
+      STORAGE_KEYS.ACCESS_TOKEN,
+      STORAGE_KEYS.REFRESH_TOKEN,
+    ]);
+    
+    // Navigate to login (will be handled by navigation listener)
+    // Or dispatch logout action to Redux
+  }
+  
+  private handleError(error: AxiosError): Promise<never> {
+    // Log error to Sentry
+    Sentry.captureException(error, {
+      contexts: {
+        request: {
+          url: error.config?.url,
+          method: error.config?.method,
+          params: error.config?.params,
+        },
+        response: {
+          status: error.response?.status,
+          data: error.response?.data,
+        },
+      },
+    });
+    
+    // Transform error for better client handling
+    const apiError = {
+      message: this.getErrorMessage(error),
+      status: error.response?.status,
+      code: (error.response?.data as any)?.code,
+      originalError: error,
+    };
+    
+    if (__DEV__) {
+      console.error('API Error:', apiError);
+    }
+    
+    return Promise.reject(apiError);
+  }
+  
+  private getErrorMessage(error: AxiosError): string {
+    if (error.response) {
+      // Server responded with error
+      const data = error.response.data as any;
+      return data?.message || 'Произошла ошибка на сервере';
+    } else if (error.request) {
+      // No response received
+      return 'Не удалось связаться с сервером. Проверьте подключение к интернету.';
+    } else {
+      // Request setup error
+      return error.message || 'Произошла ошибка при выполнении запроса';
+    }
+  }
+  
+  private generateRequestId(): string {
+    return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+  
+  // Public methods
+  get<T>(url: string, config?: AxiosRequestConfig) {
+    return this.instance.get<T>(url, config);
+  }
+  
+  post<T>(url: string, data?: any, config?: AxiosRequestConfig) {
+    return this.instance.post<T>(url, data, config);
+  }
+  
+  put<T>(url: string, data?: any, config?: AxiosRequestConfig) {
+    return this.instance.put<T>(url, data, config);
+  }
+  
+  patch<T>(url: string, data?: any, config?: AxiosRequestConfig) {
+    return this.instance.patch<T>(url, data, config);
+  }
+  
+  delete<T>(url: string, config?: AxiosRequestConfig) {
+    return this.instance.delete<T>(url, config);
+  }
+}
+
+export const apiClient = new APIClient();
+
+// src/constants/api.ts
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
+
+export const API_CONFIG = {
+  BASE_URL: __DEV__
+    ? 'http://localhost:5000/api/v1'
+    : 'https://api.primanext.ru/v1',
+  
+  WEBSOCKET_URL: __DEV__
+    ? 'ws://localhost:5000'
+    : 'wss://ws.primanext.ru',
+  
+  APP_VERSION: Constants.expoConfig?.version || '1.0.0',
+  
+  ENDPOINTS: {
+    // Auth
+    LOGIN: '/auth/login',
+    REGISTER: '/auth/register',
+    REFRESH: '/auth/refresh',
+    LOGOUT: '/auth/logout',
+    
+    // Companies
+    COMPANIES: '/companies',
+    COMPANY_SEARCH: '/companies/search',
+    COMPANY_DETAIL: (inn: string) => `/companies/${inn}`,
+    
+    // Reports
+    REPORTS: '/reports',
+    GENERATE_REPORT: '/reports/generate',
+    
+    // User
+    USER_PROFILE: '/user/profile',
+    USER_FAVORITES: '/user/favorites',
+    USER_HISTORY: '/user/history',
+  },
+  
+  TIMEOUTS: {
+    DEFAULT: 30000,
+    UPLOAD: 120000,
+    DOWNLOAD: 120000,
+  },
+};
+```
+
+### 7.2 API Services
+
+```
+// ============================================
+// API SERVICES
+// ============================================
+
+// src/services/api/companyApi.ts
+import { apiClient } from './client';
+import { API_CONFIG } from '@/constants/api';
+
+export interface SearchParams {
+  query: string;
+  status?: string;
+  region?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface CompanyResponse {
+  inn: string;
+  name_short: string;
+  name_full: string;
+  status: string;
+  registration_date: string;
+  address: any;
+  risk_score_overall: number;
+}
+
+export interface SearchResponse {
+  results: CompanyResponse[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+class CompanyAPI {
+  /**
+   * Search companies
+   */
+  async search(params: SearchParams): Promise<SearchResponse> {
+    const response = await apiClient.get<SearchResponse>(
+      API_CONFIG.ENDPOINTS.COMPANY_SEARCH,
+      { params }
+    );
+    return response.data;
+  }
+  
+  /**
+   * Get company by INN
+   */
+  async getByINN(inn: string): Promise<CompanyResponse> {
+    const response = await apiClient.get<CompanyResponse>(
+      API_CONFIG.ENDPOINTS.COMPANY_DETAIL(inn)
+    );
+    return response.data;
+  }
+  
+  /**
+   * Get company financials
+   */
+  async getFinancials(inn: string) {
+    const response = await apiClient.get(
+      `${API_CONFIG.ENDPOINTS.COMPANY_DETAIL(inn)}/financials`
+    );
+    return response.data;
+  }
+  
+  /**
+   * Get company founders
+   */
+  async getFounders(inn: string) {
+    const response = await apiClient.get(
+      `${API_CONFIG.ENDPOINTS.COMPANY_DETAIL(inn)}/founders`
+    );
+    return response.data;
+  }
+  
+  /**
+   * Add company to favorites
+   */
+  async addToFavorites(inn: string) {
+    const response = await apiClient.post(
+      `${API_CONFIG.ENDPOINTS.USER_FAVORITES}/${inn}`
+    );
+    return response.data;
+  }
+  
+  /**
+   * Remove from favorites
+   */
+  async removeFromFavorites(inn: string) {
+    const response = await apiClient.delete(
+      `${API_CONFIG.ENDPOINTS.USER_FAVORITES}/${inn}`
+    );
+    return response.data;
+  }
+}
+
+export const companyApi = new CompanyAPI();
+
+// src/services/api/reportsApi.ts
+import { apiClient } from './client';
+import { API_CONFIG } from '@/constants/api';
+
+export interface GenerateReportRequest {
+  companyInn: string;
+  reportType: 'full' | 'financial' | 'legal' | 'summary';
+  format: 'pdf' | 'excel';
+  sections?: string[];
+}
+
+export interface Report {
+  id: string;
+  companyInn: string;
+  reportType: string;
+  format: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  downloadUrl?: string;
+  createdAt: string;
+}
+
+class ReportsAPI {
+  /**
+   * Generate new report
+   */
+  async generate(request: GenerateReportRequest): Promise<Report> {
+    const response = await apiClient.post<Report>(
+      API_CONFIG.ENDPOINTS.GENERATE_REPORT,
+      request,
+      { timeout: API_CONFIG.TIMEOUTS.UPLOAD }
+    );
+    return response.data;
+  }
+  
+  /**
+   * Get report status
+   */
+  async getStatus(reportId: string): Promise<Report> {
+    const response = await apiClient.get<Report>(
+      `${API_CONFIG.ENDPOINTS.REPORTS}/${reportId}`
+    );
+    return response.data;
+  }
+  
+  /**
+   * Get user's reports
+   */
+  async getMyReports(): Promise<Report[]> {
+    const response = await apiClient.get<Report[]>(
+      API_CONFIG.ENDPOINTS.REPORTS
+    );
+    return response.data;
+  }
+  
+  /**
+   * Download report
+   */
+  async download(reportId: string): Promise<Blob> {
+    const response = await apiClient.get(
+      `${API_CONFIG.ENDPOINTS.REPORTS}/${reportId}/download`,
+      {
+        responseType: 'blob',
+        timeout: API_CONFIG.TIMEOUTS.DOWNLOAD,
+      }
+    );
+    return response.data;
+  }
+  
+  /**
+   * Delete report
+   */
+  async delete(reportId: string): Promise<void> {
+    await apiClient.delete(`${API_CONFIG.ENDPOINTS.REPORTS}/${reportId}`);
+  }
+}
+
+export const reportsApi = new ReportsAPI();
+```
+
+---
+
+## 8. Authentication & Security
+
+### 8.1 Authentication Flow
+
+```
+// ============================================
+// AUTHENTICATION & SECURITY
+// ============================================
+
+// src/features/auth/services/authService.ts
+import { apiClient } from '@/services/api/client';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as LocalAuthentication from 'expo-local-authentication';
+import * as SecureStore from 'expo-secure-store';
+import { STORAGE_KEYS } from '@/constants/storage';
+
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface RegisterData {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  phone?: string;
+}
+
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  subscription: string;
+  avatar?: string;
+}
+
+class AuthService {
+  /**
+   * Login with email and password
+   */
+  async login(credentials: LoginCredentials): Promise<{ user: User; tokens: AuthTokens }> {
+    const response = await apiClient.post('/auth/login', credentials);
+    
+    const { user, accessToken, refreshToken, expiresIn } = response.data;
+    
+    // Save tokens
+    await this.saveTokens({
+      accessToken,
+      refreshToken,
+      expiresIn,
+    });
+    
+    // Save user data
+    await this.saveUser(user);
+    
+    return { user, tokens: { accessToken, refreshToken, expiresIn } };
+  }
+  
+  /**
+   * Register new user
+   */
+  async register(data: RegisterData): Promise<{ user: User; tokens: AuthTokens }> {
+    const response = await apiClient.post('/auth/register', data);
+    
+    const { user, accessToken, refreshToken, expiresIn } = response.data;
+    
+    await this.saveTokens({ accessToken, refreshToken, expiresIn });
+    await this.saveUser(user);
+    
+    return { user, tokens: { accessToken, refreshToken, expiresIn } };
+  }
+  
+  /**
+   * Logout
+   */
+  async logout() {
+    try {
+      await apiClient.post('/auth/logout');
+    } catch (error) {
+      console.error('Logout API call failed:', error);
+    }
+    
+    // Clear all auth data
+    await AsyncStorage.multiRemove([
+      STORAGE_KEYS.ACCESS_TOKEN,
+      STORAGE_KEYS.REFRESH_TOKEN,
+      STORAGE_KEYS.USER,
+    ]);
+    
+    await SecureStore.deleteItemAsync(STORAGE_KEYS.BIOMETRIC_ENABLED);
+  }
+  
+  /**
+   * Get current user
+   */
+  async getCurrentUser(): Promise<User | null> {
+    const userJson = await AsyncStorage.getItem(STORAGE_KEYS.USER);
+    return userJson ? JSON.parse(userJson) : null;
+  }
+  
+  /**
+   * Check if user is authenticated
+   */
+  async isAuthenticated(): Promise<boolean> {
+    const token = await AsyncStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+    return !!token;
+  }
+  
+  /**
+   * Save tokens to storage
+   */
+  private async saveTokens(tokens: AuthTokens) {
+    await AsyncStorage.multiSet([
+      [STORAGE_KEYS.ACCESS_TOKEN, tokens.accessToken],
+      [STORAGE_KEYS.REFRESH_TOKEN, tokens.refreshToken],
+    ]);
+  }
+  
+  /**
+   * Save user data
+   */
+  private async saveUser(user: User) {
+    await AsyncStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+  }
+  
+  // ============================================
+  // BIOMETRIC AUTHENTICATION
+  // ============================================
+  
+  /**
+   * Check if biometric authentication is available
+   */
+  async isBiometricAvailable(): Promise<{
+    available: boolean;
+    type: 'fingerprint' | 'facial' | 'iris' | null;
+  }> {
+    const hasHardware = await LocalAuthentication.hasHardwareAsync();
+    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+    
+    if (!hasHardware || !isEnrolled) {
+      return { available: false, type: null };
+    }
+    
+    const supportedTypes = await LocalAuthentication.supportedAuthenticationTypesAsync();
+    
+    let type: 'fingerprint' | 'facial' | 'iris' | null = null;
+    if (supportedTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+      type = 'facial';
+    } else if (supportedTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
+      type = 'fingerprint';
+    } else if (supportedTypes.includes(LocalAuthentication.AuthenticationType.IRIS)) {
+      type = 'iris';
+    }
+    
+    return { available: true, type };
+  }
+  
+  /**
+   * Authenticate with biometrics
+   */
+  async authenticateWithBiometric(): Promise<boolean> {
+    const result = await LocalAuthentication.authenticateAsync({
+      promptMessage: 'Войдите в приложение',
+      cancelLabel: 'Отмена',
+      disableDeviceFallback: false,
+    });
+    
+    return result.success;
+  }
+  
+  /**
+   * Enable biometric authentication
+   */
+  async enableBiometric(password: string): Promise<boolean> {
+    // Verify password first
+    const user = await this.getCurrentUser();
+    if (!user) return false;
+    
+    try {
+      await apiClient.post('/auth/verify-password', { password });
+      
+      // Authenticate with biometric
+      const authenticated = await this.authenticateWithBiometric();
+      
+      if (authenticated) {
+        // Store encrypted credentials
+        await SecureStore.setItemAsync(
+          STORAGE_KEYS.BIOMETRIC_ENABLED,
+          'true'
+        );
+        
+        await SecureStore.setItemAsync(
+          STORAGE_KEYS.ENCRYPTED_EMAIL,
+          user.email
+        );
+        
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Failed to enable biometric:', error);
+      return false;
+    }
+  }
+  
+  /**
+   * Disable biometric authentication
+   */
+  async disableBiometric() {
+    await SecureStore.deleteItemAsync(STORAGE_KEYS.BIOMETRIC_ENABLED);
+    await SecureStore.deleteItemAsync(STORAGE_KEYS.ENCRYPTED_EMAIL);
+  }
+  
+  /**
+   * Check if biometric is enabled
+   */
+  async isBiometricEnabled(): Promise<boolean> {
+    const enabled = await SecureStore.getItemAsync(STORAGE_KEYS.BIOMETRIC_ENABLED);
+    return enabled === 'true';
+  }
+  
+  /**
+   * Login with biometric
+   */
+  async loginWithBiometric(): Promise<{ user: User; tokens: AuthTokens } | null> {
+    const isEnabled = await this.isBiometricEnabled();
+    if (!isEnabled) return null;
+    
+    const authenticated = await this.authenticateWithBiometric();
+    if (!authenticated) return null;
+    
+    const email = await SecureStore.getItemAsync(STORAGE_KEYS.ENCRYPTED_EMAIL);
+    if (!email) return null;
+    
+    // Request biometric login token from server
+    const response = await apiClient.post('/auth/biometric-login', { email });
+    
+    const { user, accessToken, refreshToken, expiresIn } = response.data;
+    
+    await this.saveTokens({ accessToken, refreshToken, expiresIn });
+    await this.saveUser(user);
+    
+    return { user, tokens: { accessToken, refreshToken, expiresIn } };
+  }
+}
+
+export const authService = new AuthService();
+
+// src/features/auth/hooks/useAuth.ts
+import { useState } from 'react';
+import { useAppDispatch, useAppSelector } from '@/hooks';
+import { login as loginAction, logout as logoutAction } from '../store/authSlice';
+import { authService, LoginCredentials } from '../services/authService';
+
+export function useAuth() {
+  const dispatch = useAppDispatch();
+  const { user, isAuthenticated, loading } = useAppSelector((state) => state.auth);
+  const [error, setError] = useState<string | null>(null);
+  
+  const login = async (credentials: LoginCredentials) => {
+    try {
+      setError(null);
+      const result = await authService.login(credentials);
+      dispatch(loginAction(result));
+      return result;
+    } catch (err: any) {
+      setError(err.message);
+      throw err;
+    }
+  };
+  
+  const loginWithBiometric = async () => {
+    try {
+      setError(null);
+      const result = await authService.loginWithBiometric();
+      if (result) {
+        dispatch(loginAction(result));
+        return result;
+      }
+      return null;
+    } catch (err: any) {
+      setError(err.message);
+      throw err;
+    }
+  };
+  
+  const logout = async () => {
+    try {
+      await authService.logout();
+      dispatch(logoutAction());
+    } catch (err: any) {
+      console.error('Logout error:', err);
+    }
+  };
+  
+  return {
+    user,
+    isAuthenticated,
+    loading,
+    error,
+    login,
+    loginWithBiometric,
+    logout,
+  };
+}
+
+// src/constants/storage.ts
+export const STORAGE_KEYS = {
+  ACCESS_TOKEN: '@primanext/access_token',
+  REFRESH_TOKEN: '@primanext/refresh_token',
+  USER: '@primanext/user',
+  BIOMETRIC_ENABLED: '@primanext/biometric_enabled',
+  ENCRYPTED_EMAIL: '@primanext/encrypted_email',
+  THEME: '@primanext/theme',
+  LANGUAGE: '@primanext/language',
+};
+```
+
+---
+
+## 9. Push Notifications
+
+### 9.1 Push Notification Setup
+
+```
+// ============================================
+// PUSH NOTIFICATIONS
+// ============================================
+
+// src/services/notifications/notificationService.ts
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { apiClient } from '../api/client';
+
+// Configure notification behavior
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
+class NotificationService {
+  private notificationListener?: Notifications.Subscription;
+  private responseListener?: Notifications.Subscription;
+  
+  /**
+   * Initialize push notifications
+   */
+  async initialize() {
+    // Request permissions
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+    
+    if (existingStatus !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+    
+    if (finalStatus !== 'granted') {
+      console.warn('Push notification permissions not granted');
+      return null;
+    }
+    
+    // Get push token
+    const token = await this.getPushToken();
+    
+    if (token) {
+      // Register token with backend
+      await this.registerPushToken(token);
+    }
+    
+    // Setup listeners
+    this.setupListeners();
+    
+    // Configure notification channel (Android)
+    if (Platform.OS === 'android') {
+      await this.configureAndroidChannel();
+    }
+    
+    return token;
+  }
+  
+  /**
+   * Get push notification token
+   */
+  private async getPushToken(): Promise<string | null> {
+    if (!Device.isDevice) {
+      console.warn('Push notifications only work on physical devices');
+      return null;
+    }
+    
+    try {
+      const token = await Notifications.getExpoPushTokenAsync({
+        projectId: 'your-expo-project-id', // From app.json
+      });
+      
+      return token.data;
+    } catch (error) {
+      console.error('Failed to get push token:', error);
+      return null;
+    }
+  }
+  
+  /**
+   * Register push token with backend
+   */
+  private async registerPushToken(token: string) {
+    try {
+      await apiClient.post('/user/push-token', {
+        token,
+        platform: Platform.OS,
+        deviceId: await this.getDeviceId(),
+      });
+      
+      // Save token locally
+      await AsyncStorage.setItem('@push_token', token);
+    } catch (error) {
+      console.error('Failed to register push token:', error);
+    }
+  }
+  
+  /**
+   * Setup notification listeners
+   */
+  private setupListeners() {
+    // Listener for notifications received while app is foregrounded
+    this.notificationListener = Notifications.addNotificationReceivedListener(
+      (notification) => {
+        console.log('Notification received:', notification);
+        this.handleNotification(notification);
+      }
+    );
+    
+    // Listener for user interactions with notifications
+    this.responseListener = Notifications.addNotificationResponseReceivedListener(
+      (response) => {
+        console.log('Notification response:', response);
+        this.handleNotificationResponse(response);
+      }
+    );
+  }
+  
+  /**
+   * Handle received notification
+   */
+  private handleNotification(notification: Notifications.Notification) {
+    const { data } = notification.request.content;
+    
+    // Handle different notification types
+    switch (data.type) {
+      case 'company_update':
+        // Update company data in cache
+        break;
+      case 'report_ready':
+        // Notify user that report is ready
+        break;
+      case 'new_feature':
+        // Show feature announcement
+        break;
+    }
+  }
+  
+  /**
+   * Handle notification tap/interaction
+   */
+  private handleNotificationResponse(response: Notifications.NotificationResponse) {
+    const { data } = response.notification.request.content;
+    
+    // Navigate based on notification type
+    switch (data.type) {
+      case 'company_update':
+        // Navigate to company screen
+        // navigation.navigate('Company', { inn: data.companyInn });
+        break;
+      case 'report_ready':
+        // Navigate to reports screen
+        // navigation.navigate('Reports', { reportId: data.reportId });
+        break;
+    }
+  }
+  
+  /**
+   * Configure Android notification channel
+   */
+  private async configureAndroidChannel() {
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'Default',
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: ,
+      lightColor: '#2196F3',
+      sound: 'default',
+    });
+    
+    await Notifications.setNotificationChannelAsync('alerts', {
+      name: 'Важные уведомления',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: ,
+      lightColor: '#F44336',
+      sound: 'default',
+    });
+  }
+  
+  /**
+   * Schedule local notification
+   */
+  async scheduleNotification(
+    title: string,
+    body: string,
+    data?: any,
+    trigger?: Notifications.NotificationTriggerInput
+  ) {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title,
+        body,
+        data,
+        sound: 'default',
+      },
+      trigger: trigger || null, // null = show immediately
+    });
+  }
+  
+  /**
+   * Cancel all notifications
+   */
+  async cancelAllNotifications() {
+    await Notifications.cancelAllScheduledNotificationsAsync();
+  }
+  
+  /**
+   * Get badge count
+   */
+  async getBadgeCount(): Promise<number> {
+    return await Notifications.getBadgeCountAsync();
+  }
+  
+  /**
+   * Set badge count
+   */
+  async setBadgeCount(count: number) {
+    await Notifications.setBadgeCountAsync(count);
+  }
+  
+  /**
+   * Clear badge
+   */
+  async clearBadge() {
+    await Notifications.setBadgeCountAsync(0);
+  }
+  
+  /**
+   * Get device ID
+   */
+  private async getDeviceId(): Promise<string> {
+    let deviceId = await AsyncStorage.getItem('@device_id');
+    
+    if (!deviceId) {
+      deviceId = `${Platform.OS}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      await AsyncStorage.setItem('@device_id', deviceId);
+    }
+    
+    return deviceId;
+  }
+  
+  /**
+   * Cleanup
+   */
+  dispose() {
+    if (this.notificationListener) {
+      Notifications.removeNotificationSubscription(this.notificationListener);
+    }
+    if (this.responseListener) {
+      Notifications.removeNotificationSubscription(this.responseListener);
+    }
+  }
+}
+
+export const notificationService = new NotificationService();
+
+// app/_layout.tsx - Initialize notifications
+import { useEffect } from 'react';
+import { notificationService } from '@/services/notifications/notificationService';
+
+export default function RootLayout() {
+  useEffect(() => {
+    // Initialize push notifications
+    notificationService.initialize();
+    
+    return () => {
+      notificationService.dispose();
+    };
+  }, []);
+  
+  return (
+    // ... app layout
+  );
+}
+```
+
+---
+
+## 10. Deep Linking & Universal Links
+
+### 10.1 Deep Linking Configuration
+
+```
+// ============================================
+// DEEP LINKING & UNIVERSAL LINKS
+// ============================================
+
+// app.json - Configure deep linking
+{
+  "expo": {
+    "scheme": "primanext",
+    "ios": {
+      "bundleIdentifier": "com.primanext.app",
+      "associatedDomains": ["applinks:primanext.ru", "applinks:app.primanext.ru"]
+    },
+    "android": {
+      "package": "com.primanext.app",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "primanext.ru",
+              "pathPrefix": "/company"
+            },
+            {
+              "scheme": "https",
+              "host": "primanext.ru",
+              "pathPrefix": "/report"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    }
+  }
+}
+
+// src/navigation/linking.ts
+import { LinkingOptions } from '@react-navigation/native';
+import * as Linking from 'expo-linking';
+
+export const linking: LinkingOptions<any> = {
+  prefixes: [
+    'primanext://',
+    'https://primanext.ru',
+    'https://app.primanext.ru',
+  ],
+  
+  config: {
+    screens: {
+      // Auth screens
+      Login: 'login',
+      Register: 'register',
+      ForgotPassword: 'forgot-password',
+      
+      // Main tabs
+      Home: '',
+      Search: 'search',
+      Favorites: 'favorites',
+      History: 'history',
+      Profile: 'profile',
+      
+      // Company screens
+      CompanyDetail: {
+        path: 'company/:inn',
+        parse: {
+          inn: (inn: string) => inn,
+        },
+      },
+      
+      // Report screens
+      ReportDetail: {
+        path: 'report/:id',
+        parse: {
+          id: (id: string) => id,
+        },
+      },
+      GenerateReport: 'generate-report/:inn',
+      
+      // Settings
+      Settings: 'settings',
+      Subscription: 'subscription',
+      
+      // Not found
+      NotFound: '*',
+    },
+  },
+  
+  async getInitialURL() {
+    // Check if app was opened by a deep link
+    const url = await Linking.getInitialURL();
+    
+    if (url != null) {
+      return url;
+    }
+    
+    // Check if app was opened by a notification
+    const notification = await Notifications.getLastNotificationResponseAsync();
+    
+    return notification?.notification.request.content.data.url;
+  },
+  
+  subscribe(listener) {
+    // Listen for deep links while app is open
+    const linkingSubscription = Linking.addEventListener('url', ({ url }) => {
+      listener(url);
+    });
+    
+    // Listen for notification taps
+    const notificationSubscription =
+      Notifications.addNotificationResponseReceivedListener((response) => {
+        const url = response.notification.request.content.data.url;
+        if (url) {
+          listener(url);
+        }
+      });
+    
+    return () => {
+      linkingSubscription.remove();
+      notificationSubscription.remove();
+    };
+  },
+};
+
+// src/hooks/useDeepLinking.ts
+import { useEffect } from 'react';
+import { useNavigation } from '@react-navigation/native';
+import * as Linking from 'expo-linking';
+import { analyticsService } from '@/services/analytics/analyticsService';
+
+export function useDeepLinking() {
+  const navigation = useNavigation();
+  
+  useEffect(() => {
+    // Handle initial URL
+    Linking.getInitialURL().then((url) => {
+      if (url) {
+        handleDeepLink(url);
+      }
+    });
+    
+    // Listen for deep links
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      handleDeepLink(url);
+    });
+    
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+  
+  const handleDeepLink = (url: string) => {
+    console.log('Deep link received:', url);
+    
+    // Track deep link open
+    analyticsService.trackEvent('deep_link_opened', {
+      url,
+    });
+    
+    // Parse URL
+    const { path, queryParams } = Linking.parse(url);
+    
+    // Handle different paths
+    if (path?.startsWith('company/')) {
+      const inn = path.replace('company/', '');
+      navigation.navigate('CompanyDetail', { inn });
+    } else if (path?.startsWith('report/')) {
+      const id = path.replace('report/', '');
+      navigation.navigate('ReportDetail', { id });
+    } else if (path === 'search' && queryParams?.q) {
+      navigation.navigate('Search', { query: queryParams.q });
+    }
+    // Add more path handlers as needed
+  };
+}
+
+// Usage in app
+// app/(tabs)/_layout.tsx
+import { useDeepLinking } from '@/hooks/useDeepLinking';
+
+export default function TabLayout() {
+  useDeepLinking();
+  
+  return (
+    <Tabs>
+      {/* ... tabs */}
+    </Tabs>
+  );
+}
+```
+
+---
+
+```markdown
+# Секция Mobile Applications системы Прима-NEXT (продолжение, часть 4 - финал)
+
+---
+
+## 11. Performance Optimization
+
+### 11.1 React Native Performance Best Practices
+
+```
+// ============================================
+// PERFORMANCE OPTIMIZATION
+// ============================================
+
+// src/components/optimized/OptimizedFlatList.tsx
+import React, { memo, useCallback } from 'react';
+import {
+  FlatList,
+  FlatListProps,
+  ViewToken,
+  View,
+  ActivityIndicator,
+} from 'react-native';
+import { useTheme } from '@/hooks/useTheme';
+
+interface OptimizedFlatListProps<T> extends FlatListProps<T> {
+  onEndReachedThreshold?: number;
+  estimatedItemSize?: number;
+}
+
+/**
+ * Optimized FlatList with best practices
+ */
+export const OptimizedFlatList = memo(<T extends any>({
+  data,
+  renderItem,
+  keyExtractor,
+  onEndReached,
+  onEndReachedThreshold = 0.5,
+  estimatedItemSize = 100,
+  ...props
+}: OptimizedFlatListProps<T>) => {
+  const theme = useTheme();
+  
+  // Memoized callbacks
+  const handleViewableItemsChanged = useCallback(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      // Track visible items for analytics
+      console.log('Visible items:', viewableItems.length);
+    },
+    []
+  );
+  
+  const viewabilityConfig = {
+    itemVisiblePercentThreshold: 50,
+    minimumViewTime: 500,
+  };
+  
+  // Empty list component
+  const EmptyComponent = useCallback(
+    () => (
+      <View style={{ padding: theme.spacing, alignItems: 'center' }}>[1]
+        <Text style={theme.textStyles.body1}>Нет данных</Text>
+      </View>
+    ),
+    [theme]
+  );
+  
+  // Footer loader
+  const FooterComponent = useCallback(
+    () =>
+      onEndReached ? (
+        <View style={{ padding: theme.spacing }}>[2]
+          <ActivityIndicator size="small" color={theme.colors.primary} />
+        </View>
+      ) : null,
+    [onEndReached, theme]
+  );
+  
+  return (
+    <FlatList
+      data={data}
+      renderItem={renderItem}
+      keyExtractor={keyExtractor}
+      
+      // Performance optimizations
+      removeClippedSubviews={true}
+      maxToRenderPerBatch={10}
+      updateCellsBatchingPeriod={50}
+      initialNumToRender={10}
+      windowSize={5}
+      
+      // Estimated item size for better initial render
+      getItemLayout={
+        estimatedItemSize
+          ? (data, index) => ({
+              length: estimatedItemSize,
+              offset: estimatedItemSize * index,
+              index,
+            })
+          : undefined
+      }
+      
+      // Pagination
+      onEndReached={onEndReached}
+      onEndReachedThreshold={onEndReachedThreshold}
+      
+      // Viewability tracking
+      onViewableItemsChanged={handleViewableItemsChanged}
+      viewabilityConfig={viewabilityConfig}
+      
+      // Empty and loading states
+      ListEmptyComponent={EmptyComponent}
+      ListFooterComponent={FooterComponent}
+      
+      {...props}
+    />
+  );
+});
+
+// src/hooks/useDebounce.ts
+import { useEffect, useState } from 'react';
+
+/**
+ * Debounce hook for optimizing search and input handling
+ */
+export function useDebounce<T>(value: T, delay: number = 300): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+  
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+    
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+  
+  return debouncedValue;
+}
+
+// src/hooks/useThrottle.ts
+import { useRef, useCallback } from 'react';
+
+/**
+ * Throttle hook for limiting function execution
+ */
+export function useThrottle<T extends (...args: any[]) => any>(
+  callback: T,
+  delay: number = 300
+): T {
+  const lastRun = useRef(Date.now());
+  
+  return useCallback(
+    ((...args) => {
+      const now = Date.now();
+      
+      if (now - lastRun.current >= delay) {
+        callback(...args);
+        lastRun.current = now;
+      }
+    }) as T,
+    [callback, delay]
+  );
+}
+
+// src/components/optimized/MemoizedComponent.tsx
+import React, { memo } from 'react';
+import { areEqual } from '@/utils/performance';
+
+/**
+ * Example of properly memoized component
+ */
+interface CompanyCardProps {
+  company: Company;
+  onPress: (inn: string) => void;
+}
+
+export const CompanyCardMemoized = memo<CompanyCardProps>(
+  ({ company, onPress }) => {
+    // Use useCallback for event handlers
+    const handlePress = useCallback(() => {
+      onPress(company.inn);
+    }, [company.inn, onPress]);
+    
+    return (
+      <TouchableOpacity onPress={handlePress}>
+        {/* Component content */}
+      </TouchableOpacity>
+    );
+  },
+  // Custom comparison function
+  (prevProps, nextProps) => {
+    return (
+      prevProps.company.inn === nextProps.company.inn &&
+      prevProps.company.nameShort === nextProps.company.nameShort &&
+      prevProps.company.riskScore === nextProps.company.riskScore
+    );
+  }
+);
+
+// src/utils/performance.ts
+import { Image } from 'react-native';
+
+/**
+ * Prefetch images for better performance
+ */
+export async function prefetchImages(urls: string[]) {
+  const promises = urls.map((url) => Image.prefetch(url));
+  await Promise.all(promises);
+}
+
+/**
+ * Memory-efficient array chunking
+ */
+export function chunkArray<T>(array: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Request Animation Frame wrapper for smooth animations
+ */
+export function requestAnimationFrameAsync(): Promise<number> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(resolve);
+  });
+}
+
+// src/services/cache/imageCache.ts
+import FastImage from 'react-native-fast-image';
+
+/**
+ * Image caching service using react-native-fast-image
+ */
+class ImageCacheService {
+  /**
+   * Preload images
+   */
+  preload(sources: Array<{ uri: string }>) {
+    FastImage.preload(sources);
+  }
+  
+  /**
+   * Clear cache
+   */
+  async clearCache() {
+    await FastImage.clearMemoryCache();
+    await FastImage.clearDiskCache();
+  }
+  
+  /**
+   * Get cache size
+   */
+  async getCacheSize() {
+    // Implementation depends on platform
+    // Could use expo-file-system to check cache directory size
+  }
+}
+
+export const imageCacheService = new ImageCacheService();
+
+// Usage in components
+// Optimized Image Component
+import FastImage from 'react-native-fast-image';
+
+export function OptimizedImage({ uri, style, ...props }) {
+  return (
+    <FastImage
+      style={style}
+      source={{
+        uri,
+        priority: FastImage.priority.normal,
+        cache: FastImage.cacheControl.immutable,
+      }}
+      resizeMode={FastImage.resizeMode.cover}
+      {...props}
+    />
+  );
+}
+```
+
+### 11.2 Bundle Size Optimization
+
+```
+// ============================================
+// BUNDLE SIZE OPTIMIZATION
+// ============================================
+
+// metro.config.js
+const { getDefaultConfig } = require('expo/metro-config');
+
+module.exports = (() => {
+  const config = getDefaultConfig(__dirname);
+  
+  // Enable Hermes
+  config.transformer.hermesCommand = 'hermes';
+  
+  // Minification
+  config.transformer.minifierConfig = {
+    keep_classnames: false,
+    keep_fnames: false,
+    mangle: {
+      keep_fnames: false,
+    },
+    compress: {
+      drop_console: true,
+      drop_debugger: true,
+    },
+  };
+  
+  return config;
+})();
+
+// babel.config.js
+module.exports = function (api) {
+  api.cache(true);
+  
+  return {
+    presets: ['babel-preset-expo'],
+    plugins: [
+      // Remove console.logs in production
+      [
+        'transform-remove-console',
+        {
+          exclude: ['error', 'warn'],
+        },
+      ],
+      
+      // Reanimated plugin (must be last)
+      'react-native-reanimated/plugin',
+      
+      // Optional: module resolver for absolute imports
+      [
+        'module-resolver',
+        {
+          root: ['./src'],
+          alias: {
+            '@': './src',
+            '@components': './src/components',
+            '@features': './src/features',
+            '@services': './src/services',
+            '@utils': './src/utils',
+            '@hooks': './src/hooks',
+            '@theme': './src/theme',
+          },
+        },
+      ],
+    ],
+    env: {
+      production: {
+        plugins: [
+          // Additional production optimizations
+          'transform-remove-console',
+        ],
+      },
+    },
+  };
+};
+```
+
+---
+
+## 12. Testing Strategy
+
+### 12.1 Unit & Component Tests
+
+```
+// ============================================
+// TESTING
+// ============================================
+
+// jest.config.js
+module.exports = {
+  preset: 'jest-expo',
+  transformIgnorePatterns: [
+    'node_modules/(?!((jest-)?react-native|@react-native(-community)?)|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|react-navigation|@react-navigation/.*|@unimodules/.*|unimodules|sentry-expo|native-base|react-native-svg)',
+  ],
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
+  collectCoverageFrom: [
+    'src/**/*.{ts,tsx}',
+    '!src/**/*.d.ts',
+    '!src/**/*.stories.tsx',
+    '!src/**/__tests__/**',
+  ],
+  coverageThreshold: {
+    global: {
+      branches: 70,
+      functions: 70,
+      lines: 70,
+      statements: 70,
+    },
+  },
+};
+
+// jest.setup.js
+import '@testing-library/jest-native/extend-expect';
+import 'react-native-gesture-handler/jestSetup';
+
+// Mock AsyncStorage
+jest.mock('@react-native-async-storage/async-storage', () =>
+  require('@react-native-async-storage/async-storage/jest/async-storage-mock')
+);
+
+// Mock react-native-reanimated
+jest.mock('react-native-reanimated', () => {
+  const Reanimated = require('react-native-reanimated/mock');
+  Reanimated.default.call = () => {};
+  return Reanimated;
+});
+
+// Mock NetInfo
+jest.mock('@react-native-community/netinfo', () => ({
+  fetch: jest.fn(() => Promise.resolve({ isConnected: true })),
+  addEventListener: jest.fn(),
+}));
+
+// __tests__/components/Button.test.tsx
+import React from 'react';
+import { render, fireEvent, screen } from '@testing-library/react-native';
+import { Button } from '@/components/common/Button/Button';
+import { ThemeProvider } from '@/contexts/ThemeContext';
+
+describe('Button Component', () => {
+  const wrapper = ({ children }) => <ThemeProvider>{children}</ThemeProvider>;
+  
+  it('renders correctly', () => {
+    render(<Button title="Click me" onPress={jest.fn()} />, { wrapper });
+    
+    expect(screen.getByText('Click me')).toBeTruthy();
+  });
+  
+  it('calls onPress when pressed', () => {
+    const onPress = jest.fn();
+    render(<Button title="Click me" onPress={onPress} />, { wrapper });
+    
+    fireEvent.press(screen.getByText('Click me'));
+    
+    expect(onPress).toHaveBeenCalledTimes(1);
+  });
+  
+  it('shows loading indicator when loading', () => {
+    render(<Button title="Click me" onPress={jest.fn()} loading />, { wrapper });
+    
+    expect(screen.queryByText('Click me')).toBeNull();
+    expect(screen.getByTestId('activity-indicator')).toBeTruthy();
+  });
+  
+  it('is disabled when disabled prop is true', () => {
+    const onPress = jest.fn();
+    render(<Button title="Click me" onPress={onPress} disabled />, { wrapper });
+    
+    const button = screen.getByText('Click me').parent;
+    fireEvent.press(button);
+    
+    expect(onPress).not.toHaveBeenCalled();
+  });
+});
+
+// __tests__/hooks/useCompany.test.ts
+import { renderHook, waitFor } from '@testing-library/react-native';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useCompany } from '@/features/company/hooks/useCompany';
+import { companyService } from '@/features/company/services/companyService';
+
+jest.mock('@/features/company/services/companyService');
+
+describe('useCompany Hook', () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+    },
+  });
+  
+  const wrapper = ({ children }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  
+  beforeEach(() => {
+    queryClient.clear();
+  });
+  
+  it('fetches company data successfully', async () => {
+    const mockCompany = {
+      inn: '7707083893',
+      nameShort: 'Газпром',
+      status: 'active',
+    };
+    
+    (companyService.getByINN as jest.Mock).mockResolvedValue(mockCompany);
+    
+    const { result } = renderHook(() => useCompany('7707083893'), { wrapper });
+    
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    
+    expect(result.current.company).toEqual(mockCompany);
+    expect(result.current.error).toBeNull();
+  });
+  
+  it('handles errors correctly', async () => {
+    (companyService.getByINN as jest.Mock).mockRejectedValue(
+      new Error('Network error')
+    );
+    
+    const { result } = renderHook(() => useCompany('7707083893'), { wrapper });
+    
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    
+    expect(result.current.company).toBeUndefined();
+    expect(result.current.error).toBeTruthy();
+  });
+});
+
+// __tests__/features/auth/authSlice.test.ts
+import authReducer, {
+  login,
+  logout,
+  AuthState,
+} from '@/features/auth/store/authSlice';
+
+describe('Auth Slice', () => {
+  const initialState: AuthState = {
+    user: null,
+    isAuthenticated: false,
+    loading: false,
+    error: null,
+  };
+  
+  it('should handle login', () => {
+    const user = {
+      id: '1',
+      email: 'test@example.com',
+      firstName: 'Test',
+      lastName: 'User',
+    };
+    
+    const state = authReducer(initialState, login({ user, tokens: {} as any }));
+    
+    expect(state.user).toEqual(user);
+    expect(state.isAuthenticated).toBe(true);
+    expect(state.error).toBeNull();
+  });
+  
+  it('should handle logout', () => {
+    const authenticatedState: AuthState = {
+      user: { id: '1', email: 'test@example.com' } as any,
+      isAuthenticated: true,
+      loading: false,
+      error: null,
+    };
+    
+    const state = authReducer(authenticatedState, logout());
+    
+    expect(state.user).toBeNull();
+    expect(state.isAuthenticated).toBe(false);
+  });
+});
+```
+
+### 12.2 E2E Tests with Detox
+
+```
+// ============================================
+// E2E TESTING WITH DETOX
+// ============================================
+
+// .detoxrc.js
+module.exports = {
+  testRunner: {
+    args: {
+      $0: 'jest',
+      config: 'e2e/jest.config.js',
+    },
+    jest: {
+      setupTimeout: 120000,
+    },
+  },
+  apps: {
+    'ios.debug': {
+      type: 'ios.app',
+      binaryPath: 'ios/build/Build/Products/Debug-iphonesimulator/PrimaNext.app',
+      build: 'xcodebuild -workspace ios/PrimaNext.xcworkspace -scheme PrimaNext -configuration Debug -sdk iphonesimulator -derivedDataPath ios/build',
+    },
+    'ios.release': {
+      type: 'ios.app',
+      binaryPath: 'ios/build/Build/Products/Release-iphonesimulator/PrimaNext.app',
+      build: 'xcodebuild -workspace ios/PrimaNext.xcworkspace -scheme PrimaNext -configuration Release -sdk iphonesimulator -derivedDataPath ios/build',
+    },
+    'android.debug': {
+      type: 'android.apk',
+      binaryPath: 'android/app/build/outputs/apk/debug/app-debug.apk',
+      build: 'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug',
+    },
+    'android.release': {
+      type: 'android.apk',
+      binaryPath: 'android/app/build/outputs/apk/release/app-release.apk',
+      build: 'cd android && ./gradlew assembleRelease assembleAndroidTest -DtestBuildType=release',
+    },
+  },
+  devices: {
+    simulator: {
+      type: 'ios.simulator',
+      device: {
+        type: 'iPhone 15 Pro',
+      },
+    },
+    emulator: {
+      type: 'android.emulator',
+      device: {
+        avdName: 'Pixel_6_API_33',
+      },
+    },
+  },
+  configurations: {
+    'ios.sim.debug': {
+      device: 'simulator',
+      app: 'ios.debug',
+    },
+    'android.emu.debug': {
+      device: 'emulator',
+      app: 'android.debug',
+    },
+  },
+};
+
+// e2e/login.e2e.ts
+import { device, element, by, expect } from 'detox';
+
+describe('Login Flow', () => {
+  beforeAll(async () => {
+    await device.launchApp();
+  });
+  
+  beforeEach(async () => {
+    await device.reloadReactNative();
+  });
+  
+  it('should show login screen', async () => {
+    await expect(element(by.id('login-screen'))).toBeVisible();
+    await expect(element(by.id('email-input'))).toBeVisible();
+    await expect(element(by.id('password-input'))).toBeVisible();
+    await expect(element(by.id('login-button'))).toBeVisible();
+  });
+  
+  it('should login successfully with valid credentials', async () => {
+    await element(by.id('email-input')).typeText('test@example.com');
+    await element(by.id('password-input')).typeText('password123');
+    await element(by.id('login-button')).tap();
+    
+    // Wait for navigation to home screen
+    await waitFor(element(by.id('home-screen')))
+      .toBeVisible()
+      .withTimeout(5000);
+  });
+  
+  it('should show error with invalid credentials', async () => {
+    await element(by.id('email-input')).typeText('wrong@example.com');
+    await element(by.id('password-input')).typeText('wrongpassword');
+    await element(by.id('login-button')).tap();
+    
+    await expect(element(by.id('error-message'))).toBeVisible();
+  });
+  
+  it('should navigate to register screen', async () => {
+    await element(by.id('register-link')).tap();
+    await expect(element(by.id('register-screen'))).toBeVisible();
+  });
+});
+
+// e2e/companySearch.e2e.ts
+describe('Company Search', () => {
+  beforeAll(async () => {
+    await device.launchApp();
+    // Login first
+    await element(by.id('email-input')).typeText('test@example.com');
+    await element(by.id('password-input')).typeText('password123');
+    await element(by.id('login-button')).tap();
+    await waitFor(element(by.id('home-screen'))).toBeVisible().withTimeout(5000);
+  });
+  
+  it('should search for company by name', async () => {
+    await element(by.id('search-input')).typeText('Газпром');
+    
+    await waitFor(element(by.id('search-results')))
+      .toBeVisible()
+      .withTimeout(3000);
+    
+    await expect(element(by.id('company-card-0'))).toBeVisible();
+  });
+  
+  it('should open company detail screen', async () => {
+    await element(by.id('search-input')).typeText('Газпром');
+    await waitFor(element(by.id('company-card-0'))).toBeVisible();
+    
+    await element(by.id('company-card-0')).tap();
+    
+    await expect(element(by.id('company-detail-screen'))).toBeVisible();
+    await expect(element(by.id('company-name'))).toBeVisible();
+    await expect(element(by.id('risk-indicator'))).toBeVisible();
+  });
+  
+  it('should add company to favorites', async () => {
+    await element(by.id('search-input')).typeText('Газпром');
+    await waitFor(element(by.id('company-card-0'))).toBeVisible();
+    await element(by.id('company-card-0')).tap();
+    
+    await element(by.id('favorite-button')).tap();
+    
+    await expect(element(by.text('Добавлено в избранное'))).toBeVisible();
+  });
+});
+```
+
+---
+
+## 13. CI/CD Pipeline
+
+### 13.1 GitHub Actions Workflow
+
+```
+# ============================================
+# CI/CD PIPELINE
+# ============================================
+
+# .github/workflows/mobile-ci.yml
+name: Mobile App CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'mobile/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'mobile/**'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: ./mobile
+        run: npm ci
+      
+      - name: Run linter
+        working-directory: ./mobile
+        run: npm run lint
+      
+      - name: Run type check
+        working-directory: ./mobile
+        run: npm run type-check
+      
+      - name: Run tests
+        working-directory: ./mobile
+        run: npm run test -- --coverage
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./mobile/coverage/lcov.info
+          flags: mobile
+  
+  build-ios:
+    name: Build iOS
+    runs-on: macos-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+      
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      
+      - name: Install dependencies
+        working-directory: ./mobile
+        run: npm ci
+      
+      - name: Build iOS app
+        working-directory: ./mobile
+        run: eas build --platform ios --profile production --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      
+      - name: Submit to App Store
+        if: github.ref == 'refs/heads/main'
+        working-directory: ./mobile
+        run: eas submit --platform ios --latest
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+  
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      
+      - name: Install dependencies
+        working-directory: ./mobile
+        run: npm ci
+      
+      - name: Build Android app
+        working-directory: ./mobile
+        run: eas build --platform android --profile production --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      
+      - name: Submit to Play Store
+        if: github.ref == 'refs/heads/main'
+        working-directory: ./mobile
+        run: eas submit --platform android --latest
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+# eas.json - EAS Build Configuration
+{
+  "cli": {
+    "version": ">= 5.9.0"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "ios": {
+        "buildConfiguration": "Release"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "channel": "production",
+      "ios": {
+        "buildConfiguration": "Release",
+        "autoIncrement": true
+      },
+      "android": {
+        "buildType": "aab",
+        "autoIncrement": true
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "developer@primanext.ru",
+        "ascAppId": "1234567890",
+        "appleTeamId": "ABCDEF1234"
+      },
+      "android": {
+        "serviceAccountKeyPath": "./credentials/play-store-key.json",
+        "track": "production"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 14. Analytics & Monitoring
+
+### 14.1 Analytics Implementation
+
+```
+// ============================================
+// ANALYTICS & MONITORING
+// ============================================
+
+// src/services/analytics/analyticsService.ts
+import analytics from '@react-native-firebase/analytics';
+import * as Sentry from '@sentry/react-native';
+import { Platform } from 'react-native';
+
+export interface EventProperties {
+  [key: string]: string | number | boolean | undefined;
+}
+
+class AnalyticsService {
+  private isInitialized = false;
+  
+  /**
+   * Initialize analytics services
+   */
+  async initialize() {
+    if (this.isInitialized) return;
+    
+    try {
+      // Firebase Analytics is auto-initialized
+      await analytics().setAnalyticsCollectionEnabled(true);
+      
+      // Initialize Sentry
+      Sentry.init({
+        dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
+        environment: __DEV__ ? 'development' : 'production',
+        enableAutoSessionTracking: true,
+        sessionTrackingIntervalMillis: 30000,
+        tracesSampleRate: __DEV__ ? 1.0 : 0.2,
+        integrations: [
+          new Sentry.ReactNativeTracing({
+            tracingOrigins: ['localhost', 'primanext.ru', /^\//],
+            routingInstrumentation: new Sentry.ReactNavigationInstrumentation(),
+          }),
+        ],
+      });
+      
+      this.isInitialized = true;
+    } catch (error) {
+      console.error('Failed to initialize analytics:', error);
+    }
+  }
+  
+  /**
+   * Set user properties
+   */
+  async setUserProperties(userId: string, properties: EventProperties) {
+    try {
+      await analytics().setUserId(userId);
+      await analytics().setUserProperties(properties);
+      
+      Sentry.setUser({
+        id: userId,
+        ...properties,
+      });
+    } catch (error) {
+      console.error('Failed to set user properties:', error);
+    }
+  }
+  
+  /**
+   * Clear user data (on logout)
+   */
+  async clearUser() {
+    try {
+      await analytics().setUserId(null);
+      await analytics().setUserProperties({});
+      
+      Sentry.setUser(null);
+    } catch (error) {
+      console.error('Failed to clear user:', error);
+    }
+  }
+  
+  /**
+   * Track screen view
+   */
+  async trackScreenView(screenName: string, properties?: EventProperties) {
+    try {
+      await analytics().logScreenView({
+        screen_name: screenName,
+        screen_class: screenName,
+        ...properties,
+      });
+      
+      Sentry.addBreadcrumb({
+        category: 'navigation',
+        message: `Screen: ${screenName}`,
+        level: 'info',
+        data: properties,
+      });
+    } catch (error) {
+      console.error('Failed to track screen view:', error);
+    }
+  }
+  
+  /**
+   * Track custom event
+   */
+  async trackEvent(eventName: string, properties?: EventProperties) {
+    try {
+      await analytics().logEvent(eventName, {
+        platform: Platform.OS,
+        timestamp: new Date().toISOString(),
+        ...properties,
+      });
+      
+      Sentry.addBreadcrumb({
+        category: 'event',
+        message: eventName,
+        level: 'info',
+        data: properties,
+      });
+    } catch (error) {
+      console.error('Failed to track event:', error);
+    }
+  }
+  
+  /**
+   * Track error
+   */
+  trackError(error: Error, context?: EventProperties) {
+    try {
+      Sentry.captureException(error, {
+        contexts: {
+          custom: context,
+        },
+      });
+      
+      if (__DEV__) {
+        console.error('Tracked error:', error, context);
+      }
+    } catch (err) {
+      console.error('Failed to track error:', err);
+    }
+  }
+  
+  /**
+   * Track purchase
+   */
+  async trackPurchase(
+    transactionId: string,
+    value: number,
+    currency: string,
+    items: any[]
+  ) {
+    try {
+      await analytics().logPurchase({
+        transaction_id: transactionId,
+        value,
+        currency,
+        items,
+      });
+    } catch (error) {
+      console.error('Failed to track purchase:', error);
+    }
+  }
+  
+  /**
+   * Start performance trace
+   */
+  async startTrace(traceName: string): Promise<any> {
+    try {
+      const trace = await analytics().startTrace(traceName);
+      return trace;
+    } catch (error) {
+      console.error('Failed to start trace:', error);
+      return null;
+    }
+  }
+}
+
+export const analyticsService = new AnalyticsService();
+
+// src/hooks/useAnalytics.ts
+import { useEffect } from 'react';
+import { useRoute } from '@react-navigation/native';
+import { analyticsService } from '@/services/analytics/analyticsService';
+
+/**
+ * Auto-track screen views
+ */
+export function useScreenAnalytics() {
+  const route = useRoute();
+  
+  useEffect(() => {
+    analyticsService.trackScreenView(route.name, route.params as any);
+  }, [route]);
+}
+
+// Usage in screens
+// app/company/[inn].tsx
+import { useScreenAnalytics } from '@/hooks/useAnalytics';
+
+export default function CompanyDetailScreen() {
+  useScreenAnalytics();
+  
+  // ... rest of component
+}
+```
+
+### 14.2 Performance Monitoring
+
+```
+// ============================================
+// PERFORMANCE MONITORING
+// ============================================
+
+// src/services/performance/performanceMonitor.ts
+import * as Performance from '@react-native-firebase/perf';
+
+class PerformanceMonitor {
+  private traces: Map<string, any> = new Map();
+  
+  /**
+   * Start monitoring a trace
+   */
+  async startTrace(traceName: string): Promise<void> {
+    try {
+      const trace = await Performance().startTrace(traceName);
+      this.traces.set(traceName, trace);
+    } catch (error) {
+      console.error(`Failed to start trace ${traceName}:`, error);
+    }
+  }
+  
+  /**
+   * Stop monitoring a trace
+   */
+  async stopTrace(traceName: string): Promise<void> {
+    try {
+      const trace = this.traces.get(traceName);
+      if (trace) {
+        await trace.stop();
+        this.traces.delete(traceName);
+      }
+    } catch (error) {
+      console.error(`Failed to stop trace ${traceName}:`, error);
+    }
+  }
+  
+  /**
+   * Add metric to trace
+   */
+  async putMetric(traceName: string, metricName: string, value: number): Promise<void> {
+    try {
+      const trace = this.traces.get(traceName);
+      if (trace) {
+        await trace.putMetric(metricName, value);
+      }
+    } catch (error) {
+      console.error(`Failed to add metric to trace ${traceName}:`, error);
+    }
+  }
+  
+  /**
+   * Monitor API request
+   */
+  async monitorHttpRequest(url: string, method: string): Promise<any> {
+    try {
+      const httpMetric = await Performance().newHttpMetric(url, method);
+      await httpMetric.start();
+      return httpMetric;
+    } catch (error) {
+      console.error('Failed to monitor HTTP request:', error);
+      return null;
+    }
+  }
+  
+  /**
+   * Complete HTTP request monitoring
+   */
+  async completeHttpRequest(
+    httpMetric: any,
+    statusCode: number,
+    responseSize: number
+  ): Promise<void> {
+    try {
+      if (httpMetric) {
+        httpMetric.setHttpResponseCode(statusCode);
+        httpMetric.setResponseContentType('application/json');
+        httpMetric.setResponsePayloadSize(responseSize);
+        await httpMetric.stop();
+      }
+    } catch (error) {
+      console.error('Failed to complete HTTP request monitoring:', error);
+    }
+  }
+}
+
+export const performanceMonitor = new PerformanceMonitor();
+
+// Usage with API requests
+// src/services/api/client.ts
+import { performanceMonitor } from '@/services/performance/performanceMonitor';
+
+// In request interceptor
+this.instance.interceptors.request.use(async (config) => {
+  const httpMetric = await performanceMonitor.monitorHttpRequest(
+    config.url!,
+    config.method!.toUpperCase()
+  );
+  
+  config.metadata = { httpMetric };
+  
+  return config;
+});
+
+// In response interceptor
+this.instance.interceptors.response.use(async (response) => {
+  const httpMetric = response.config.metadata?.httpMetric;
+  
+  if (httpMetric) {
+    const responseSize = JSON.stringify(response.data).length;
+    await performanceMonitor.completeHttpRequest(
+      httpMetric,
+      response.status,
+      responseSize
+    );
+  }
+  
+  return response;
+});
+```
+
+---
+
+## 15. App Store Deployment
+
+### 15.1 iOS App Store
+
+```
+# ============================================
+# iOS APP STORE DEPLOYMENT
+# ============================================
+
+# 1. Prepare app metadata
+# - Screenshots (all required sizes)
+# - App icon (1024x1024)
+# - Privacy policy URL
+# - Support URL
+# - Marketing materials
+
+# 2. Update version in app.json
+# "version": "1.0.0"
+# "ios": {
+#   "buildNumber": "1"
+# }
+
+# 3. Build production app
+eas build --platform ios --profile production
+
+# 4. Submit to App Store
+eas submit --platform ios
+
+# App Store Connect configuration:
+# - App Name: "Прима-NEXT"
+# - Bundle ID: com.primanext.app
+# - Category: Business
+# - Age Rating: 4+
+# - Privacy Policy: https://primanext.ru/privacy
+# - Support URL: https://primanext.ru/support
+
+# 5. App Review Information
+# - Demo account credentials
+# - Testing instructions
+# - Export compliance information
+```
+
+### 15.2 Android Play Store
+
+```
+# ============================================
+# ANDROID PLAY STORE DEPLOYMENT
+# ============================================
+
+# 1. Prepare app metadata
+# - Feature graphic (1024x500)
+# - Screenshots (phone, tablet)
+# - App icon (512x512)
+# - Privacy policy URL
+
+# 2. Update version in app.json
+# "version": "1.0.0"
+# "android": {
+#   "versionCode": 1
+# }
+
+# 3. Build production AAB
+eas build --platform android --profile production
+
+# 4. Submit to Play Store
+eas submit --platform android
+
+# Play Store Console configuration:
+# - App name: "Прима-NEXT"
+# - Package name: com.primanext.app
+# - Category: Business
+# - Content rating: PEGI 3
+# - Target audience: Business users
+# - Privacy policy: https://primanext.ru/privacy
+
+# 5. Release tracks:
+# - Internal testing → Closed testing → Open testing → Production
+# - Staged rollout: 10% → 50% → 100%
+```
+
+### 15.3 OTA Updates with EAS Update
+
+```
+# ============================================
+# OVER-THE-AIR UPDATES
+# ============================================
+
+# Configure EAS Update
+# eas.json
+{
+  "cli": {
+    "version": ">= 5.9.0"
+  },
+  "build": {
+    "production": {
+      "channel": "production"
+    }
+  },
+  "update": {
+    "production": {
+      "channel": "production"
+    }
+  }
+}
+
+# Publish OTA update
+eas update --branch production --message "Bug fixes and performance improvements"
+
+# Check update status
+eas update:list --branch production
+
+# Rollback if needed
+eas update:republish --group-id <group-id>
+```
+
+---
+
+**Секция Mobile Applications завершена!**
+
+✅ **Все разделы мобильного приложения покрыты:**
+- Mobile Strategy & Architecture (React Native + Expo)
+- Technology Stack (TypeScript, Redux, React Query)
+- Clean Architecture Implementation
+- UI/UX Design System (Design Tokens, Components)
+- State Management (Redux Toolkit + React Query)
+- Offline-First Architecture (Local DB, Sync)
+- API Integration (Axios, Interceptors)
+- Authentication & Security (Biometric, JWT)
+- Push Notifications (FCM, APNs)
+- Deep Linking & Universal Links
+- Performance Optimization (Memoization, Image Caching)
+- Testing (Unit, Integration, E2E with Detox)
+- CI/CD Pipeline (GitHub Actions, EAS Build)
+- Analytics & Monitoring (Firebase, Sentry)
+- App Store Deployment (iOS + Android)
+
+**Мобильное приложение готово к production deployment с полным набором enterprise-функций!** 📱🚀✨
+
+
 
 13. Дополнительные модули - ❌ НЕ ОПИСАНО
 ✗ Admin Panel (детально)
